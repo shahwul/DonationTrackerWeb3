@@ -6,9 +6,68 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { CheckCircle, AlertCircle, Loader2, Heart, DollarSign, User, Wallet, ChevronDown } from "lucide-react";
+import { CheckCircle, AlertCircle, Loader2, Heart, DollarSign, User, Wallet, ExternalLink } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+
+// MetaMask connection utilities
+const connectToMetaMask = async () => {
+  if (typeof window.ethereum === 'undefined') {
+    throw new Error('MetaMask is not installed. Please install MetaMask to continue.');
+  }
+
+  try {
+    // Request account access
+    const accounts = await window.ethereum.request({
+      method: 'eth_requestAccounts',
+    });
+
+    // Switch to Sepolia network
+    try {
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: '0xAA36A7' }], // Sepolia testnet
+      });
+    } catch (switchError) {
+      // If network doesn't exist, add it
+      if (switchError.code === 4902) {
+        await window.ethereum.request({
+          method: 'wallet_addEthereumChain',
+          params: [{
+            chainId: '0xAA36A7',
+            chainName: 'Sepolia Testnet',
+            nativeCurrency: {
+              name: 'ETH',
+              symbol: 'ETH',
+              decimals: 18,
+            },
+            rpcUrls: ['https://ethereum-sepolia-rpc.publicnode.com'],
+            blockExplorerUrls: ['https://sepolia.etherscan.io/'],
+          }],
+        });
+      } else {
+        throw switchError;
+      }
+    }
+
+    return accounts[0];
+  } catch (error) {
+    throw new Error(`Failed to connect to MetaMask: ${error.message}`);
+  }
+};
+
+const getBalance = async (address) => {
+  try {
+    const balance = await window.ethereum.request({
+      method: 'eth_getBalance',
+      params: [address, 'latest'],
+    });
+    // Convert from wei to ETH
+    return (parseInt(balance, 16) / Math.pow(10, 18)).toFixed(6);
+  } catch (error) {
+    console.error('Error getting balance:', error);
+    return '0.000000';
+  }
+};
 
 export default function DonationPage() {
   const router = useRouter();
@@ -18,57 +77,94 @@ export default function DonationPage() {
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState({});
   const [estimatedETH, setEstimatedETH] = useState(null);
-  const [wallets, setWallets] = useState([]);
-  const [selectedWalletId, setSelectedWalletId] = useState("");
-  const [selectedWallet, setSelectedWallet] = useState(null);
+  const [walletAddress, setWalletAddress] = useState("");
+  const [walletBalance, setWalletBalance] = useState("0.000000");
+  const [isConnected, setIsConnected] = useState(false);
   const [userId, setUserId] = useState(null);
-  const [walletsLoading, setWalletsLoading] = useState(true);
+  const [connecting, setConnecting] = useState(false);
 
-  // ✅ Ambil user Supabase dan wallets saat halaman dimuat
+  // Check authentication
   useEffect(() => {
-    const checkAuthAndFetchWallets = async () => {
+    const checkAuth = async () => {
       const { data: { user }, error } = await supabase.auth.getUser();
-
       if (error || !user) {
         router.push("/login");
         return;
       }
-
       setUserId(user.id);
+    };
+    checkAuth();
+  }, [router]);
 
-      // Fetch all wallets by user.id
-      try {
-        setWalletsLoading(true);
-        const res = await fetch(`/api/wallet/${user.id}`);
-        if (!res.ok) throw new Error("Wallets not found");
+  // Check if MetaMask is already connected
+  useEffect(() => {
+    const checkMetaMaskConnection = async () => {
+      if (typeof window.ethereum !== 'undefined') {
+        try {
+          const accounts = await window.ethereum.request({
+            method: 'eth_accounts',
+          });
 
-        const walletsData = await res.json();
-        console.log("Fetched wallets:", walletsData.wallets[0]);
-        setWallets(walletsData);
-
-        // Auto-select first wallet if available
-        if (walletsData.length > 0) {
-          setSelectedWalletId(walletsData.wallets[0].id);
-          setSelectedWallet(walletsData.wallets[0]);
+          if (accounts.length > 0) {
+            setWalletAddress(accounts[0]);
+            setIsConnected(true);
+            const balance = await getBalance(accounts[0]);
+            setWalletBalance(balance);
+          }
+        } catch (error) {
+          console.error('Error checking MetaMask connection:', error);
         }
-      } catch (err) {
-        console.error("Failed to fetch wallets:", err);
-        setWallets([]);
-      } finally {
-        setWalletsLoading(false);
       }
     };
 
-    checkAuthAndFetchWallets();
-  }, [router]);
+    checkMetaMaskConnection();
 
-  // Update selected wallet when wallet ID changes
-  useEffect(() => {
-    if (selectedWalletId && wallets.length > 0) {
-      const wallet = wallets.wallets.find(w => w.id === selectedWalletId);
-      setSelectedWallet(wallet || null);
+    // Listen for account changes
+    if (typeof window.ethereum !== 'undefined') {
+      const handleAccountsChanged = async (accounts) => {
+        if (accounts.length === 0) {
+          setIsConnected(false);
+          setWalletAddress("");
+          setWalletBalance("0.000000");
+        } else {
+          setWalletAddress(accounts[0]);
+          setIsConnected(true);
+          const balance = await getBalance(accounts[0]);
+          setWalletBalance(balance);
+        }
+      };
+
+      const handleChainChanged = () => {
+        window.location.reload();
+      };
+
+      window.ethereum.on('accountsChanged', handleAccountsChanged);
+      window.ethereum.on('chainChanged', handleChainChanged);
+
+      return () => {
+        window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
+        window.ethereum.removeListener('chainChanged', handleChainChanged);
+      };
     }
-  }, [selectedWalletId, wallets]);
+  }, []);
+
+  const handleConnectWallet = async () => {
+    try {
+      setConnecting(true);
+      const address = await connectToMetaMask();
+      setWalletAddress(address);
+      setIsConnected(true);
+      const balance = await getBalance(address);
+      setWalletBalance(balance);
+    } catch (error) {
+      setResult({
+        status: "error",
+        message: error.message
+      });
+    } finally {
+      setConnecting(false);
+    }
+  };
 
   const formatIDR = (amount) => {
     return new Intl.NumberFormat("id-ID", {
@@ -86,8 +182,8 @@ export default function DonationPage() {
   const validateForm = () => {
     const newErrors = {};
 
-    if (!selectedWalletId) {
-      newErrors.wallet = "Please select a wallet";
+    if (!isConnected) {
+      newErrors.wallet = "Please connect your MetaMask wallet";
     }
 
     if (!name.trim()) {
@@ -143,62 +239,105 @@ export default function DonationPage() {
 
   const handleDonate = async () => {
     if (!validateForm()) return;
-    if (!selectedWallet?.private_key) {
-      setResult({ status: "error", message: "Selected wallet not found or invalid" });
-      return;
-    }
 
     try {
       setLoading(true);
       setResult(null);
 
+      // Step 1: Get transaction data from our API
       const response = await fetch("/api/donate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: name.trim(),
           amount_idr: Number(amountIDR),
-          private_key: selectedWallet.private_key,
+          wallet_address: walletAddress,
         }),
       });
 
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
 
       const data = await response.json();
-      setResult(data);
 
-      if (data.status === "success") {
-        // simpan ke Supabase
-        const log = await fetch("/api/donate", {
+      if (data.status !== "success") {
+        throw new Error(data.message || "Failed to prepare transaction");
+      }
+
+      // Step 2: Send transaction through MetaMask
+      const txHash = await window.ethereum.request({
+        method: 'eth_sendTransaction',
+        params: [{
+          from: walletAddress,
+          to: data.transactionData.to,
+          value: '0x' + BigInt(data.transactionData.value).toString(16),
+          data: data.transactionData.data,
+          gas: '0x' + parseInt(data.transactionData.gasLimit).toString(16),
+        }],
+      });
+
+      // Step 3: Show success result
+      setResult({
+        status: "success",
+        txHash: txHash,
+        ethAmount: data.ethAmount,
+        name: data.name,
+      });
+
+      // Step 4: Log donation to Supabase
+      try {
+        const logResponse = await fetch("/api/donation-log", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             user_id: userId,
-            wallet_id: selectedWalletId,
+            wallet_address: walletAddress,
             name: name.trim(),
             amount_idr: Number(amountIDR),
             amount_eth: data.ethAmount,
-            tx_hash: data.txHash,
+            tx_hash: txHash,
             status: "success",
           }),
         });
 
-        if (!log.ok) {
+        if (!logResponse.ok) {
           console.warn("Failed to log donation to Supabase");
         }
-
-        setName("");
-        setAmountIDR("");
-        setEstimatedETH(null);
+      } catch (logError) {
+        console.warn("Error logging donation:", logError);
       }
+
+      // Step 5: Update wallet balance and clear form
+      setTimeout(async () => {
+        const newBalance = await getBalance(walletAddress);
+        setWalletBalance(newBalance);
+      }, 2000); // Wait a bit for transaction to be mined
+
+      setName("");
+      setAmountIDR("");
+      setEstimatedETH(null);
 
     } catch (err) {
       console.error("Donation error:", err);
+
+      let errorMessage = "An unexpected error occurred";
+
+      if (err.code === 4001) {
+        errorMessage = "Transaction cancelled by user";
+      } else if (err.code === -32603) {
+        errorMessage = "Transaction failed. Please check your wallet balance and try again.";
+      } else if (err.message?.includes("insufficient funds")) {
+        errorMessage = "Insufficient ETH balance to complete this transaction";
+      } else if (err.message?.includes("user rejected")) {
+        errorMessage = "Transaction rejected by user";
+      } else if (err.message === "Failed to fetch") {
+        errorMessage = "Unable to connect to server. Please check your connection.";
+      } else {
+        errorMessage = err.message || errorMessage;
+      }
+
       setResult({
         status: "error",
-        message: err.message === "Failed to fetch"
-          ? "Unable to connect to server. Please check your connection."
-          : err.message || "An unexpected error occurred"
+        message: errorMessage
       });
     } finally {
       setLoading(false);
@@ -220,211 +359,212 @@ export default function DonationPage() {
             <Heart className="w-6 h-6" />
           </div>
           <h1 className="text-2xl font-bold text-gray-900">Make a Donation</h1>
-          <p className="text-gray-600">Support our cause with cryptocurrency</p>
+          <p className="text-gray-600">Support our cause with cryptocurrency via MetaMask</p>
         </div>
 
-        {/* Main Form Card */}
+        {/* MetaMask Connection Card */}
         <Card className="shadow-lg border-0 bg-white/80 backdrop-blur-sm">
           <CardHeader className="pb-4">
             <CardTitle className="text-lg font-semibold text-gray-800 flex items-center gap-2">
-              <DollarSign className="w-5 h-5 text-green-600" />
-              Donation Details
+              <Wallet className="w-5 h-5 text-orange-600" />
+              MetaMask Wallet
             </CardTitle>
           </CardHeader>
-          <CardContent className="space-y-6">
-            {/* Wallet Selector */}
-            <div className="space-y-2">
-              <Label htmlFor="wallet" className="text-sm font-medium text-gray-700 flex items-center gap-2">
-                <Wallet className="w-4 h-4" />
-                Select Wallet
-              </Label>
-              {walletsLoading ? (
-                <div className="flex items-center gap-2 p-3 border rounded-md bg-gray-50">
-                  <Loader2 className="w-4 h-4 animate-spin text-gray-500" />
-                  <span className="text-sm text-gray-600">Loading wallets...</span>
-                </div>
-              ) : wallets.length === 0 ? (
-                <div className="p-3 border border-red-200 rounded-md bg-red-50">
-                  <p className="text-sm text-red-600 flex items-center gap-2">
-                    <AlertCircle className="w-4 h-4" />
-                    No wallets found. Please create a wallet first.
+          <CardContent>
+            {!isConnected ? (
+              <div className="space-y-4">
+                <div className="text-center p-6 border-2 border-dashed border-gray-300 rounded-lg">
+                  <Wallet className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+                  <p className="text-sm text-gray-600 mb-4">
+                    Connect your MetaMask wallet to make a donation
                   </p>
+                  <Button
+                    onClick={handleConnectWallet}
+                    disabled={connecting}
+                    className="bg-orange-500 hover:bg-orange-600 text-white"
+                  >
+                    {connecting ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Connecting...
+                      </>
+                    ) : (
+                      <>
+                        <Wallet className="w-4 h-4 mr-2" />
+                        Connect MetaMask
+                      </>
+                    )}
+                  </Button>
                 </div>
-              ) : (
-                <Select value={selectedWalletId} onValueChange={setSelectedWalletId}>
-                  <SelectTrigger className={`transition-all ${errors.wallet ? 'border-red-500 focus:border-red-500' : 'focus:border-blue-500'}`}>
-                    <SelectValue placeholder="Choose a wallet" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {wallets.wallets.map((wallet) => (
-                      <SelectItem key={wallet.id} value={wallet.id}>
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
-                            <Wallet className="w-4 h-4 text-white" />
-                          </div>
-                          <div className="flex flex-col">
-                            {/* <span className="font-medium">{wallet.name || `Wallet ${wallet.id.slice(0, 8)}`}</span> */}
-                            <span className="text-xs text-gray-500">{formatAddress(wallet.address)}</span>
-                          </div>
-                        </div>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-              {errors.wallet && (
-                <p className="text-sm text-red-600 flex items-center gap-1">
-                  <AlertCircle className="w-3 h-3" />
-                  {errors.wallet}
-                </p>
-              )}
-              {selectedWallet && (
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                  <div className="flex items-center gap-2 mb-2">
-                    <div className="w-6 h-6 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
-                      <Wallet className="w-3 h-3 text-white" />
-                    </div>
-                    <span className="text-sm font-medium text-blue-800">
-                      {/* {selectedWallet.name || `Wallet ${selectedWallet.id.slice(0, 8)}`} */}
-                    </span>
+                {errors.wallet && (
+                  <p className="text-sm text-red-600 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3" />
+                    {errors.wallet}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center">
+                    <CheckCircle className="w-5 h-5 text-white" />
                   </div>
-                  <p className="text-xs text-blue-600 font-mono">
-                    Address: {selectedWallet.address}
+                  <div>
+                    <p className="text-sm font-medium text-green-800">Wallet Connected</p>
+                    <p className="text-xs text-green-600">Sepolia Testnet</p>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <div>
+                    <p className="text-xs font-medium text-green-700 mb-1">Address:</p>
+                    <p className="text-xs text-green-600 font-mono break-all">{walletAddress}</p>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs font-medium text-green-700">Balance:</span>
+                    <span className="text-xs font-bold text-green-800">{walletBalance} ETH</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Main Form Card */}
+        {isConnected && (
+          <Card className="shadow-lg border-0 bg-white/80 backdrop-blur-sm">
+            <CardHeader className="pb-4">
+              <CardTitle className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+                <DollarSign className="w-5 h-5 text-green-600" />
+                Donation Details
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {/* Name Input */}
+              <div className="space-y-2">
+                <Label htmlFor="name" className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                  <User className="w-4 h-4" />
+                  Full Name
+                </Label>
+                <Input
+                  id="name"
+                  value={name}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    if (errors.name) setErrors(prev => ({ ...prev, name: "" }));
+                  }}
+                  onKeyPress={handleKeyPress}
+                  placeholder="Enter your full name"
+                  className={`transition-all ${errors.name ? 'border-red-500 focus:border-red-500' : 'focus:border-blue-500'}`}
+                />
+                {errors.name && (
+                  <p className="text-sm text-red-600 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3" />
+                    {errors.name}
                   </p>
-                  {selectedWallet.balance && (
-                    <p className="text-xs text-blue-600 mt-1">
-                      Balance: {Number(selectedWallet.balance).toFixed(6)} ETH
-                    </p>
+                )}
+              </div>
+
+              {/* Amount Input */}
+              <div className="space-y-2">
+                <Label htmlFor="amount" className="text-sm font-medium text-gray-700">
+                  Donation Amount (IDR)
+                </Label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">Rp</span>
+                  <Input
+                    id="amount"
+                    type="number"
+                    value={amountIDR}
+                    onChange={(e) => {
+                      setAmountIDR(e.target.value);
+                      if (errors.amount) setErrors(prev => ({ ...prev, amount: "" }));
+                    }}
+                    onKeyPress={handleKeyPress}
+                    placeholder="100,000"
+                    className={`pl-10 transition-all ${errors.amount ? 'border-red-500 focus:border-red-500' : 'focus:border-blue-500'}`}
+                  />
+                </div>
+                {errors.amount && (
+                  <p className="text-sm text-red-600 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3" />
+                    {errors.amount}
+                  </p>
+                )}
+                {amountIDR && Number(amountIDR) >= 10000 && (
+                  <p className="text-sm text-gray-600">
+                    ≈ {formatIDR(Number(amountIDR))}
+                  </p>
+                )}
+              </div>
+
+              {/* ETH Estimation */}
+              {estimatedETH && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                  {estimatedETH === "loading" ? (
+                    <div className="flex items-center gap-2 text-blue-700">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span className="text-sm">Getting latest ETH price...</span>
+                    </div>
+                  ) : estimatedETH === "error" ? (
+                    <div className="text-sm text-red-600">
+                      <AlertCircle className="w-4 h-4 inline mr-1" />
+                      Unable to fetch current ETH price. Please try again.
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      <p className="text-sm text-blue-700">
+                        <strong>Estimated ETH:</strong> {estimatedETH.amount.toFixed(6)} ETH
+                      </p>
+                      <p className="text-xs text-blue-600">
+                        Rate: {formatIDR(estimatedETH.rate)} per ETH
+                      </p>
+                      <p className="text-xs text-blue-500">
+                        Updated: {estimatedETH.timestamp.toLocaleTimeString()} • Powered by CoinGecko
+                      </p>
+                    </div>
                   )}
                 </div>
               )}
-            </div>
 
-            {/* Name Input */}
-            <div className="space-y-2">
-              <Label htmlFor="name" className="text-sm font-medium text-gray-700 flex items-center gap-2">
-                <User className="w-4 h-4" />
-                Full Name
-              </Label>
-              <Input
-                id="name"
-                value={name}
-                onChange={(e) => {
-                  setName(e.target.value);
-                  if (errors.name) setErrors(prev => ({ ...prev, name: "" }));
-                }}
-                onKeyPress={handleKeyPress}
-                placeholder="Enter your full name"
-                className={`transition-all ${errors.name ? 'border-red-500 focus:border-red-500' : 'focus:border-blue-500'}`}
-              />
-              {errors.name && (
-                <p className="text-sm text-red-600 flex items-center gap-1">
-                  <AlertCircle className="w-3 h-3" />
-                  {errors.name}
-                </p>
-              )}
-            </div>
-
-            {/* Amount Input */}
-            <div className="space-y-2">
-              <Label htmlFor="amount" className="text-sm font-medium text-gray-700">
-                Donation Amount (IDR)
-              </Label>
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">Rp</span>
-                <Input
-                  id="amount"
-                  type="number"
-                  value={amountIDR}
-                  onChange={(e) => {
-                    setAmountIDR(e.target.value);
-                    if (errors.amount) setErrors(prev => ({ ...prev, amount: "" }));
-                  }}
-                  onKeyPress={handleKeyPress}
-                  placeholder="100,000"
-                  className={`pl-10 transition-all ${errors.amount ? 'border-red-500 focus:border-red-500' : 'focus:border-blue-500'}`}
-                />
+              {/* Quick Amount Buttons */}
+              <div className="space-y-2">
+                <Label className="text-sm font-medium text-gray-700">Quick Select</Label>
+                <div className="grid grid-cols-3 gap-2">
+                  {[50000, 100000, 250000].map((amount) => (
+                    <Button
+                      key={amount}
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setAmountIDR(amount.toString())}
+                      className="text-xs hover:bg-blue-50 hover:border-blue-300"
+                    >
+                      {formatIDR(amount)}
+                    </Button>
+                  ))}
+                </div>
               </div>
-              {errors.amount && (
-                <p className="text-sm text-red-600 flex items-center gap-1">
-                  <AlertCircle className="w-3 h-3" />
-                  {errors.amount}
-                </p>
-              )}
-              {amountIDR && Number(amountIDR) >= 10000 && (
-                <p className="text-sm text-gray-600">
-                  ≈ {formatIDR(Number(amountIDR))}
-                </p>
-              )}
-            </div>
 
-            {/* ETH Estimation */}
-            {estimatedETH && (
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                {estimatedETH === "loading" ? (
-                  <div className="flex items-center gap-2 text-blue-700">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    <span className="text-sm">Getting latest ETH price...</span>
-                  </div>
-                ) : estimatedETH === "error" ? (
-                  <div className="text-sm text-red-600">
-                    <AlertCircle className="w-4 h-4 inline mr-1" />
-                    Unable to fetch current ETH price. Please try again.
-                  </div>
+              {/* Donate Button */}
+              <Button
+                onClick={handleDonate}
+                disabled={loading || !name.trim() || !amountIDR || !isConnected}
+                className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium py-2.5 transition-all duration-200"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Processing Donation...
+                  </>
                 ) : (
-                  <div className="space-y-1">
-                    <p className="text-sm text-blue-700">
-                      <strong>Estimated ETH:</strong> {estimatedETH.amount.toFixed(6)} ETH
-                    </p>
-                    <p className="text-xs text-blue-600">
-                      Rate: {formatIDR(estimatedETH.rate)} per ETH
-                    </p>
-                    <p className="text-xs text-blue-500">
-                      Updated: {estimatedETH.timestamp.toLocaleTimeString()} • Powered by CoinGecko
-                    </p>
-                  </div>
+                  <>
+                    <Heart className="w-4 h-4 mr-2" />
+                    Donate Now
+                  </>
                 )}
-              </div>
-            )}
-
-            {/* Quick Amount Buttons */}
-            <div className="space-y-2">
-              <Label className="text-sm font-medium text-gray-700">Quick Select</Label>
-              <div className="grid grid-cols-3 gap-2">
-                {[50000, 100000, 250000].map((amount) => (
-                  <Button
-                    key={amount}
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setAmountIDR(amount.toString())}
-                    className="text-xs hover:bg-blue-50 hover:border-blue-300"
-                  >
-                    {formatIDR(amount)}
-                  </Button>
-                ))}
-              </div>
-            </div>
-
-            {/* Donate Button */}
-            <Button
-              onClick={handleDonate}
-              disabled={loading || !name.trim() || !amountIDR || !selectedWalletId || wallets.length === 0}
-              className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium py-2.5 transition-all duration-200"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  Processing Donation...
-                </>
-              ) : (
-                <>
-                  <Heart className="w-4 h-4 mr-2" />
-                  Donate Now
-                </>
-              )}
-            </Button>
-          </CardContent>
-        </Card>
+              </Button>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Result Display */}
         {result && (
@@ -467,7 +607,7 @@ export default function DonationPage() {
                             <div>
                               <p className="text-xs font-medium text-green-700 mb-1">From Wallet:</p>
                               <p className="text-xs text-green-600 font-mono">
-                                {`Wallet ${selectedWalletId}`} ({formatAddress(selectedWallet?.address)})
+                                {formatAddress(walletAddress)}
                               </p>
                             </div>
                             <div>
@@ -477,6 +617,14 @@ export default function DonationPage() {
                                   {result.txHash}
                                 </code>
                               </div>
+                              <a
+                                href={`https://sepolia.etherscan.io/tx/${result.txHash}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-xs text-green-600 hover:text-green-800 mt-1"
+                              >
+                                View on Etherscan <ExternalLink className="w-3 h-3" />
+                              </a>
                             </div>
                             <div className="flex justify-between items-center pt-2 border-t border-green-200">
                               <span className="text-sm font-medium text-green-700">ETH Sent:</span>
@@ -528,7 +676,7 @@ export default function DonationPage() {
 
         {/* Footer */}
         <div className="text-center text-xs text-gray-500 pb-8">
-          <p>Secured by blockchain technology • Real-time rates by CoinGecko API</p>
+          <p>Secured by MetaMask & Ethereum blockchain • Real-time rates by CoinGecko API</p>
         </div>
       </div>
     </div>

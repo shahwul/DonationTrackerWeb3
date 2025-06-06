@@ -13,34 +13,85 @@ const oracleAddress = process.env.SEPOLIA_ORACLE_ADDRESS;
 export async function POST(req) {
     try {
         const body = await req.json();
-        const { name, amount_idr, private_key } = body;
+        const { name, amount_idr, wallet_address } = body;
 
-        if (!name || !amount_idr || !private_key) {
-            return NextResponse.json({ status: 'error', message: 'Missing fields' }, { status: 400 });
+        if (!name || !amount_idr || !wallet_address) {
+            return NextResponse.json({
+                status: 'error',
+                message: 'Missing required fields: name, amount_idr, or wallet_address'
+            }, { status: 400 });
         }
 
-        const signer = new ethers.Wallet(private_key, provider);
-        const donationContract = new ethers.Contract(contractAddress, abiDonation, signer);
-        const oracleContract = new ethers.Contract(oracleAddress, abiOracle, signer);
+        // Validate wallet address format
+        if (!ethers.isAddress(wallet_address)) {
+            return NextResponse.json({
+                status: 'error',
+                message: 'Invalid wallet address format'
+            }, { status: 400 });
+        }
 
-        const ethtoUSD = await oracleContract.getEthToUsd();
-        const USDtoIDR = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=usd&vs_currencies=idr');
+        // Get ETH to USD price from oracle
+        const oracleContract = new ethers.Contract(oracleAddress, abiOracle, provider);
+        const ethToUsdPrice = await oracleContract.getEthToUsd();
 
-        const amountETH = Number(amount_idr) / (Number(USDtoIDR.data.usd.idr) * Number(ethtoUSD) / 1e8);
+        // Get USD to IDR rate from CoinGecko
+        const usdToIdrResponse = await axios.get(
+            'https://api.coingecko.com/api/v3/simple/price?ids=usd&vs_currencies=idr',
+            { timeout: 10000 }
+        );
 
-        const tx = await donationContract.donate(name, {
-            value: ethers.parseEther(amountETH.toFixed(18)),
-        });
-        await tx.wait();
+        const usdToIdrRate = usdToIdrResponse.data.usd.idr;
 
+        // Calculate ETH amount needed
+        // ETH price in USD = ethToUsdPrice / 1e8 (oracle returns price with 8 decimals)
+        // ETH price in IDR = (ethToUsdPrice / 1e8) * usdToIdrRate
+        // ETH amount = amount_idr / ETH price in IDR
+        const ethPriceInUsd = Number(ethToUsdPrice) / 1e8;
+        const ethPriceInIdr = ethPriceInUsd * usdToIdrRate;
+        const amountETH = Number(amount_idr) / ethPriceInIdr;
+
+        // Validate minimum ETH amount (to avoid dust transactions)
+        if (amountETH < 0.000001) {
+            return NextResponse.json({
+                status: 'error',
+                message: 'Donation amount too small. Please increase the amount.'
+            }, { status: 400 });
+        }
+
+        // Return transaction data for MetaMask to process
+        // MetaMask will handle the actual transaction signing and submission
         return NextResponse.json({
             status: 'success',
-            txHash: tx.hash,
+            transactionData: {
+                to: contractAddress,
+                value: ethers.parseEther(amountETH.toFixed(18)).toString(),
+                data: new ethers.Interface(abiDonation).encodeFunctionData('donate', [name]),
+                gasLimit: '100000', // Estimated gas limit
+            },
             ethAmount: amountETH,
+            ethPriceInUsd: ethPriceInUsd,
+            ethPriceInIdr: ethPriceInIdr,
             name: name,
         });
+
     } catch (err) {
-        console.log(err);
-        return NextResponse.json({ status: 'error', message: err.message }, { status: 500 });
+        console.error('Donation API Error:', err);
+
+        let errorMessage = 'An unexpected error occurred';
+
+        if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
+            errorMessage = 'Request timeout. Please check your connection and try again.';
+        } else if (err.message.includes('network')) {
+            errorMessage = 'Network error. Please check your connection.';
+        } else if (err.message.includes('oracle') || err.message.includes('contract')) {
+            errorMessage = 'Smart contract error. Please try again later.';
+        } else if (axios.isAxiosError(err)) {
+            errorMessage = 'Failed to fetch current exchange rates. Please try again.';
+        }
+
+        return NextResponse.json({
+            status: 'error',
+            message: errorMessage
+        }, { status: 500 });
     }
 }
