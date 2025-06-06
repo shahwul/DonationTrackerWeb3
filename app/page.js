@@ -80,21 +80,7 @@ export default function DonationPage() {
   const [walletAddress, setWalletAddress] = useState("");
   const [walletBalance, setWalletBalance] = useState("0.000000");
   const [isConnected, setIsConnected] = useState(false);
-  const [userId, setUserId] = useState(null);
   const [connecting, setConnecting] = useState(false);
-
-  // Check authentication
-  useEffect(() => {
-    const checkAuth = async () => {
-      const { data: { user }, error } = await supabase.auth.getUser();
-      if (error || !user) {
-        router.push("/login");
-        return;
-      }
-      setUserId(user.id);
-    };
-    checkAuth();
-  }, [router]);
 
   // Check if MetaMask is already connected
   useEffect(() => {
@@ -289,7 +275,6 @@ export default function DonationPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            user_id: userId,
             wallet_address: walletAddress,
             name: name.trim(),
             amount_idr: Number(amountIDR),
