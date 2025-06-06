@@ -1,8 +1,4 @@
-Website dapat diakses melalui:
-
-```markdown
-https://donation-tracker-web3.vercel.app/
-```
+Website dapat diakses melalui: [https://donation-tracker-web3.vercel.app/](https://donation-tracker-web3.vercel.app/)
 
 # Donation Tracker Web3
 
