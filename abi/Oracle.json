@@ -1,0 +1,10 @@
+[
+  "constructor()",
+  "event RateUpdated(uint256)",
+  "function ethToIdr() view returns (uint256)",
+  "function ethtoUSD() view returns (uint256)",
+  "function getEthToUsd() view returns (uint256)",
+  "function getRate() view returns (uint256)",
+  "function priceFeed() view returns (address)",
+  "function updateRate(uint256)"
+]
